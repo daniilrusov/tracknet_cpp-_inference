@@ -1,9 +1,9 @@
 # tracknet_cpp_inference
 ## Libtorch
-Get libtorch from https://pytorch.org/get-started/locally/
+Get libtorch from https://pytorch.org/get-started/locally/ and unzip it into ```include``` directory.
 ```bash
-wget https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.1.0%2Bcpu.zip
-unzip libtorch-shared-with-deps-2.1.0+cpu.zip
+wget https://download.pytorch.org/libtorch/cu118/libtorch-cxx11-abi-shared-with-deps-2.2.0%2Bcu118.zip
+unzip libtorch-cxx11-abi-shared-with-deps-2.2.0%2Bcu118.zip
 ```
 
 ## Test data
@@ -13,10 +13,21 @@ python spdsim_v3.py 1000
 ```
 Will generate the output.tsv file with 1000 events.
 
+## Create docker
+```bash
+docker-compose up -d
+```
+Connect to terminal:
+```bash
+docker-compose exec app bash
+```
+
 ## Build with cmake
 ```bash
-mkdir build
-cd build
-cmake -DCMAKE_PREFIX_PATH=/path/to/libtorch/ ..
-cmake --build . --config Release
+cmake -S . -B build
+cmake --build build
 ```
+Then execute:
+ ```bash
+ ./main file.tsv n_events
+ ```

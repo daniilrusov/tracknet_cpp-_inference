@@ -1,3 +1,5 @@
+#pragma comment(linker, "/include:?warp_size@cuda@at@@yahxz")
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -9,6 +11,7 @@
 #include <torch/script.h>
 
 #define N_STATIONS 35
+#define PRINT true
 
 using namespace std;
 using namespace torch::indexing;
@@ -44,7 +47,11 @@ vector<vector<Hit>> parse_csv(string path, int n_events)
     {
         result[evt].push_back({hit_id, trk, station, x, y, z});
         hit_id++;
+        if (PRINT)
+        cout << "\r parsing hits: " << hit_id;
     }
+    if (PRINT)
+    cout << endl;
     return result;
 }
 
@@ -73,7 +80,11 @@ vector<vector<Hit>> transform(vector<vector<Hit>> hits_all)
             
         }
         i++;
+        if (PRINT)
+        cout << "\r transforming hits: " << i;
     }
+    if (PRINT)
+    cout << endl;
     return new_hits;
 }
 
@@ -89,7 +100,11 @@ vector<vector<Hit>> combine(vector<vector<Hit>> hits_all, int n_together)
     for (int i = 0; i < hits_all.size(); i++)
     {
         result[i / n_together].insert(result[i / n_together].end(), hits_all[i].begin(), hits_all[i].end());
+        if (PRINT)
+        cout << "\r combining hits: " << i;
     }
+    if (PRINT)
+    cout << endl;
     return result;
 }
 
@@ -183,21 +198,33 @@ vector<int> get_hits_indexes_global(vector<int> first_station_indexes)
 
 
 int main(int argc, const char* argv[]) {
-    string path = "/lustre/home/user/d/drusov/tracknet_cpp_inference/output.tsv";
-    int n_events = 1000;
+    string path = argv[1];//"./output-100k.tsv";
+    int n_events = stoi(argv[2]);//100000;
     int combine_together = 40;
     
     vector<vector<Hit>> hits_all = parse_csv(path, n_events);
     hits_all = transform(hits_all);
     hits_all = combine(hits_all, combine_together);
     n_events = n_events / combine_together;
+
+    torch::Device device(torch::kCPU);
+    if (torch::cuda::is_available()) {
+        std::cout << "CUDA is available! Executing on GPU." << std::endl;
+        device = torch::kCUDA;
+    }
+    else {
+        std::cout << "CUDA is not available! Executing on CPU." << std::endl;
+    }
     
-    torch::jit::script::Module model = torch::jit::load("/lustre/home/user/d/drusov/tracknet_cpp_inference/tracknet_torchscript_model.pt");
+    torch::jit::script::Module model = torch::jit::load("./tracknet_torchscript_model_cuda.pt", device);
+    //model.to(device);
     cout << "model loaded\n";
+    model.eval();
+    //cout << model.device() << "\n";
     
     vector<double> model_times;
     vector<double> preproc_times;
-    
+
     for (int event_id = 0; event_id < n_events; event_id++)
     {
         auto ev_start = high_resolution_clock::now();
@@ -216,16 +243,16 @@ int main(int argc, const char* argv[]) {
         vector<torch::Tensor> hits_by_station_T;
         for (auto hits: hits_by_station)
         {
-            hits_by_station_T.push_back(torch::from_blob(hits.data(), {hits.size() / 3, 3}).clone());
+            hits_by_station_T.push_back(torch::from_blob(hits.data(), {hits.size() / 3, 3}).clone().to(device));
         }
         vector<torch::Tensor> indexes_by_station_T;
         for (auto indexes: indexes_by_station)
         {
-            indexes_by_station_T.push_back(torch::from_blob(indexes.data(), {indexes.size(), 1}, int_options).clone());
+            indexes_by_station_T.push_back(torch::from_blob(indexes.data(), {indexes.size(), 1}, int_options).clone().to(device));
         }
-        torch::Tensor chunk_data_x_T = torch::from_blob(chunk_data_x.data(), {n_first_hits, N_STATIONS, 3}).clone();
-        torch::Tensor cand_mask_T = torch::from_blob(cand_mask.data(), {n_first_hits, 1}, int_options).clone();
-        torch::Tensor hits_indexes_global_T = torch::from_blob(hits_indexes_global.data(), {n_first_hits, N_STATIONS}, int_options).clone();
+        torch::Tensor chunk_data_x_T = torch::from_blob(chunk_data_x.data(), {n_first_hits, N_STATIONS, 3}).clone().to(device);
+        torch::Tensor cand_mask_T = torch::from_blob(cand_mask.data(), {n_first_hits, 1}, int_options).clone().to(device);
+        torch::Tensor hits_indexes_global_T = torch::from_blob(hits_indexes_global.data(), {n_first_hits, N_STATIONS}, int_options).clone().to(device);
         
         auto ev_preproc_end = high_resolution_clock::now();
         
@@ -233,19 +260,21 @@ int main(int argc, const char* argv[]) {
         auto output = model.forward({chunk_data_x_T, cand_mask_T, hits_indexes_global_T, hits_by_station_T, indexes_by_station_T}).toTensor();
         // output - (N, 35) array of hit indexes for predicted track candidates, -1 if no hit on station (on the last stations for short tracks e. g.)
         //cout << output.index({Slice(0, 10)}) << endl; // prints first 10 cands
-        cout << event_id << " " << output.sizes() << endl;
+        //cout << event_id << " " << output.sizes() << endl;
         
         auto ev_model_end = high_resolution_clock::now();
         
         duration<double, std::milli> preproc_duration = ev_preproc_end - ev_start;
         duration<double, std::milli> model_duration = ev_model_end - ev_preproc_end;
-        
-        preproc_times.push_back(preproc_duration.count());
-        model_times.push_back(model_duration.count());
+        if (event_id > 5) {
+            preproc_times.push_back(preproc_duration.count());
+            model_times.push_back(model_duration.count());
+        }
     }
     
     double preproc_average = accumulate(preproc_times.begin(), preproc_times.end(), 0.0) / n_events;
     double model_average = accumulate(model_times.begin(), model_times.end(), 0.0) / n_events;
     cout << "Preprocessing time per event: " << preproc_average << " ms, model time per event: " << model_average << " ms" << endl;
+    cout << model_times[0] << " " << model_times[1] << " " << model_times[2] << endl;
     return 0;
 }
